@@ -1,4 +1,4 @@
-import provider from "../connection";
+import provider from "../utils/connection";
 
 
 async function getLatestBlockNumber() {

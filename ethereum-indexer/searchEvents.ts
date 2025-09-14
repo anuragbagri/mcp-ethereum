@@ -1,5 +1,5 @@
 import { ethers } from "ethers";
-import provider from "../connection";
+import provider from "../utils/connection";
 
 export async function searchEvents(contractAddress : string, abi : any, eventName : string , fromBlock : number , toBlock : number) {
    const Contract = new ethers.Contract(contractAddress, abi ,provider);
