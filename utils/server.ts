@@ -1,13 +1,12 @@
-import { Server } from "@modelcontextprotocol/sdk/server";
-import { registerEthereumTools } from "./tools";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerEthereumTools } from "./tools.js";
 
-export function getServer() {
-    const server = new Server({
-        name : "ethereum-indexer",
-        version : "1.0.0"
-    });
+export function getServer(): McpServer {
+  const server = new McpServer({
+    name: "ethereum-indexer",
+    version: "1.0.0",
+  });
 
-    // tools or endpoints function 
-    registerEthereumTools(server);
-    return server;
+  registerEthereumTools(server);
+  return server;
 }

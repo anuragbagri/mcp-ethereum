@@ -1,111 +1,127 @@
-import { getBlock } from "../ethereum-indexer/getBlock";
-import { getLogs } from "../ethereum-indexer/getLogs";
-import { getTransaction } from "../ethereum-indexer/getTransaction";
-import { searchEvents } from "../ethereum-indexer/searchEvents";
-import type { Server } from "@modelcontextprotocol/sdk/server";
+import { z } from "zod";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { getBlock } from "../ethereum-indexer/getBlock.js";
+import { getLogs } from "../ethereum-indexer/getLogs.js";
+import { getTransaction } from "../ethereum-indexer/getTransaction.js";
+import { parseAndValidateAbi, searchEvents } from "../ethereum-indexer/searchEvents.js";
+import { runTool, validationError } from "./execution.js";
 
-export function registerEthereumTools(server: Server) {
-  // 4 tools or endpoints
-  // Register getBlock tool
-  server.registerTool({
-    name: "getBlock",
-    description: "Fetch Ethereum block details by number",
-    inputSchema: {
-      type: "object",
-      properties: {
-        blockNumber: { type: "number" },
-      },
-      required: ["blockNumber"],
-    },
-    async execute({ blockNumber }: { blockNumber: number }) {
-      const block = await getBlock(blockNumber);
-      return { block };
-    },
-  });
+const ethAddressRegex = /^0x[a-fA-F0-9]{40}$/;
+const txHashRegex = /^0x[a-fA-F0-9]{64}$/;
 
-  // Register getLogs tool
-  server.registerTool({
-    name: "getLogs",
-    description: "Fetch logs from a contract within a block range",
-    inputSchema: {
-      type: "object",
-      properties: {
-        address: { type: "string" },
-        fromBlock: { type: "number" },
-        toBlock: { type: "number" },
-        topics: { type: "array", items: { type: "string" }, default: [] },
-      },
-      required: ["address", "fromBlock", "toBlock"],
-    },
-    async execute({
-      address,
-      fromBlock,
-      toBlock,
-      topics,
-    }: {
-      address: string;
-      fromBlock: number;
-      toBlock: number;
-      topics?: string[];
-    }) {
-      const logs = await getLogs(address, fromBlock, toBlock, topics || []);
-      return { logs };
-    },
-  });
+const blockNumberSchema = z.number().int().nonnegative();
+const optionalCursorSchema = z.number().int().nonnegative().optional();
+const pageSizeSchema = z.number().int().positive().max(2000).optional();
 
-  // Register getTransaction tool
-  server.registerTool({
-    name: "getTransaction",
-    description: "Fetch Ethereum transaction details by hash",
-    inputSchema: {
-      type: "object",
-      properties: {
-        txHash: { type: "string" },
-      },
-      required: ["txHash"],
-    },
-    async execute({ txHash }: { txHash: string }) {
-      const tx = await getTransaction(txHash);
-      return { tx };
-    },
-  });
+function assertBlockRange(fromBlock: number, toBlock: number): void {
+  if (fromBlock > toBlock) {
+    throw validationError("fromBlock must be less than or equal to toBlock", { fromBlock, toBlock });
+  }
+}
 
-  //Register searchEvents tool
-  server.registerTool({
-    name: "searchEvents",
-    description: "Search & decode contract events by ABI and name",
-    inputSchema: {
-      type: "object",
-      properties: {
-        contractAddress: { type: "string" },
-        abi: { type: "any" },
-        eventName: { type: "string" },
-        fromBlock: { type: "number" },
-        toBlock: { type: "number" },
+export function registerEthereumTools(server: McpServer): void {
+  server.registerTool(
+    "getBlock",
+    {
+      description: "Fetch Ethereum block details by number",
+      inputSchema: {
+        blockNumber: blockNumberSchema,
       },
-      required: ["contractAddress", "abi", "eventName", "fromBlock", "toBlock"],
     },
-    async execute({
-      contractAddress,
-      abi,
-      eventName,
-      fromBlock,
-      toBlock,
-    }: {
-      contractAddress: string;
-      abi: any;
-      eventName: string;
-      fromBlock: number;
-      toBlock: number;
-    }) {
-      const events = await searchEvents(
-        contractAddress,
-        abi,
-        eventName,
-        fromBlock,
-        toBlock
-      );
-      return { events };
+    async ({ blockNumber }) => runTool("getBlock", { blockNumber }, async () => getBlock(blockNumber)),
+  );
+
+  server.registerTool(
+    "getLogs",
+    {
+      description: "Fetch logs from a contract within a block range",
+      inputSchema: {
+        address: z.string().regex(ethAddressRegex, "address must be a valid 0x-prefixed 20-byte hex address"),
+        fromBlock: blockNumberSchema,
+        toBlock: blockNumberSchema,
+        topics: z.array(z.string().regex(txHashRegex, "topics entries must be 32-byte hex values")).optional(),
+        cursor: optionalCursorSchema,
+        pageSize: pageSizeSchema,
+      },
     },
-  });
+    async ({ address, fromBlock, toBlock, topics, cursor, pageSize }) =>
+      runTool(
+        "getLogs",
+        { address, fromBlock, toBlock, cursor, pageSize },
+        async () => {
+          assertBlockRange(fromBlock, toBlock);
+          if (cursor !== undefined && (cursor < fromBlock || cursor > toBlock)) {
+            throw validationError("cursor must be within the requested block range", {
+              cursor,
+              fromBlock,
+              toBlock,
+            });
+          }
+
+          return getLogs({
+            address,
+            fromBlock,
+            toBlock,
+            topics,
+            cursor,
+            pageSize,
+          });
+        },
+      ),
+  );
+
+  server.registerTool(
+    "getTransaction",
+    {
+      description: "Fetch Ethereum transaction details by hash",
+      inputSchema: {
+        txHash: z.string().regex(txHashRegex, "txHash must be a valid 32-byte transaction hash"),
+      },
+    },
+    async ({ txHash }) => runTool("getTransaction", { txHash }, async () => getTransaction(txHash)),
+  );
+
+  server.registerTool(
+    "searchEvents",
+    {
+      description: "Search and decode contract events by ABI and event name",
+      inputSchema: {
+        contractAddress: z
+          .string()
+          .regex(ethAddressRegex, "contractAddress must be a valid 0x-prefixed 20-byte hex address"),
+        abi: z.unknown(),
+        eventName: z.string().min(1),
+        fromBlock: blockNumberSchema,
+        toBlock: blockNumberSchema,
+        cursor: optionalCursorSchema,
+        pageSize: z.number().int().positive().max(1000).optional(),
+      },
+    },
+    async ({ contractAddress, abi, eventName, fromBlock, toBlock, cursor, pageSize }) =>
+      runTool(
+        "searchEvents",
+        { contractAddress, eventName, fromBlock, toBlock, cursor, pageSize },
+        async () => {
+          assertBlockRange(fromBlock, toBlock);
+          if (cursor !== undefined && (cursor < fromBlock || cursor > toBlock)) {
+            throw validationError("cursor must be within the requested block range", {
+              cursor,
+              fromBlock,
+              toBlock,
+            });
+          }
+
+          const validatedAbi = parseAndValidateAbi(abi);
+          return searchEvents({
+            contractAddress,
+            abi: validatedAbi,
+            eventName,
+            fromBlock,
+            toBlock,
+            cursor,
+            pageSize,
+          });
+        },
+      ),
+  );
 }
